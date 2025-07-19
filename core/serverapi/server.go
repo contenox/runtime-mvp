@@ -23,6 +23,7 @@ import (
 	"github.com/contenox/runtime-mvp/core/serverapi/poolapi"
 	providersapi "github.com/contenox/runtime-mvp/core/serverapi/providerapi"
 	"github.com/contenox/runtime-mvp/core/serverapi/systemapi"
+	"github.com/contenox/runtime-mvp/core/serverapi/telegramapi"
 	"github.com/contenox/runtime-mvp/core/serverapi/usersapi"
 	"github.com/contenox/runtime-mvp/core/serverops"
 	"github.com/contenox/runtime-mvp/core/serverops/vectors"
@@ -40,6 +41,7 @@ import (
 	"github.com/contenox/runtime-mvp/core/services/modelservice"
 	"github.com/contenox/runtime-mvp/core/services/poolservice"
 	"github.com/contenox/runtime-mvp/core/services/providerservice"
+	"github.com/contenox/runtime-mvp/core/services/telegramservice"
 	"github.com/contenox/runtime-mvp/core/services/userservice"
 	"github.com/contenox/runtime-mvp/core/taskengine"
 	"github.com/contenox/runtime-mvp/libs/libauth"
@@ -148,10 +150,25 @@ func New(
 	activityService := activityservice.New(tracker, taskengine.NewAlertSink(kvManager))
 	activityapi.AddActivityRoutes(mux, config, activityService)
 	githubService := githubservice.New(dbInstance)
+	githubService = githubservice.WithActivityTracker(githubService, serveropsChainedTracker)
 	githubapi.AddGitHubRoutes(mux, config, githubService)
+	githubworker := githubservice.NewWorker(githubService, kvManager, tracker, dbInstance)
+	libroutine.GetPool().StartLoop(ctx, "github-worker-pull", 2, time.Minute, time.Minute, func(ctx context.Context) error {
+		ctx = context.WithValue(ctx, serverops.ContextKeyRequestID, "github-worker-pull:"+uuid.NewString())
+		return githubworker.ReceiveTick(ctx)
+	})
+	libroutine.GetPool().StartLoop(ctx, "github-worker-sync", 2, time.Minute, time.Minute, func(ctx context.Context) error {
+		ctx = context.WithValue(ctx, serverops.ContextKeyRequestID, "github-worker-sync:"+uuid.NewString())
+		return githubworker.ProcessTick(ctx)
+	})
 
 	chainService := chainservice.New(dbInstance)
 	chainsapi.AddChainRoutes(mux, config, chainService)
+
+	telegramService := telegramservice.New(dbInstance)
+	telegramService = telegramservice.WithServiceActivityTracker(telegramService, serveropsChainedTracker)
+	telegramapi.AddTelegramRoutes(mux, telegramService)
+
 	handler = enableCORS(config, handler)
 	handler = requestIDMiddleware(config, handler)
 	handler = jwtRefreshMiddleware(config, handler)
